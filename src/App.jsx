@@ -1,54 +1,100 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { Plus, Trash2, ClipboardCopy, Users, Coins, Wheat, RefreshCcw, AlertTriangle, FileSpreadsheet } from 'lucide-react';
+// Import fungsi Firestore
+import { collection, addDoc, deleteDoc, doc, onSnapshot, query, orderBy, getDocs, writeBatch } from 'firebase/firestore';
+import { db } from './firebase'; // Sesuaikan path jika file firebase.js ada di tempat lain
 
 const App = () => {
-  // Mengambil data dari localStorage saat pertama kali load
-  const [dataZakat, setDataZakat] = useState(() => {
-    const saved = localStorage.getItem('zakat_baiturrahim_data');
-    return saved ? JSON.parse(saved) : [];
-  });
-
+  // State untuk menyimpan data dari Firebase
+  const [dataZakat, setDataZakat] = useState([]);
+  
   const [formData, setFormData] = useState({
     nama: '',
     jumlahJiwa: 1,
-    jenisZakat: 'Beras', // Opsi Beras langsung tampil pertama
+    jenisZakat: 'Beras',
     keterangan: 'Lunas'
   });
 
   const [showConfirmReset, setShowConfirmReset] = useState(false);
+  const [isLoading, setIsLoading] = useState(true); // Tambahan state loading
 
   const NOMINAL_UANG = 40000;
   const NOMINAL_BERAS = 2.5;
 
-  // Menyimpan data ke localStorage setiap kali ada perubahan pada dataZakat
-  useEffect(() => {
-    localStorage.setItem('zakat_baiturrahim_data', JSON.stringify(dataZakat));
-  }, [dataZakat]);
+  // Nama collection di Firestore
+  const collectionRef = collection(db, 'zakat_baiturrahim_data');
 
-  const handleAdd = (e) => {
+  // Mengambil data dari Firebase secara realtime (onSnapshot)
+  useEffect(() => {
+    // Query data diurutkan berdasarkan timestamp (data terbaru di atas)
+    const q = query(collectionRef, orderBy('timestamp', 'desc'));
+    
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const dataMuzakki = snapshot.docs.map((doc) => ({
+        id: doc.id, // ID unik dari Firestore
+        ...doc.data()
+      }));
+      setDataZakat(dataMuzakki);
+      setIsLoading(false);
+    }, (error) => {
+      console.error("Error fetching data: ", error);
+      setIsLoading(false);
+    });
+
+    // Membersihkan listener saat komponen unmount
+    return () => unsubscribe();
+  }, []);
+
+  const handleAdd = async (e) => {
     e.preventDefault();
     if (!formData.nama) return;
 
-    const newEntry = {
-      id: Date.now(),
-      ...formData,
-      totalZakat: formData.jenisZakat === 'Uang' 
-        ? formData.jumlahJiwa * NOMINAL_UANG 
-        : formData.jumlahJiwa * NOMINAL_BERAS
-    };
+    const totalZakat = formData.jenisZakat === 'Uang' 
+      ? formData.jumlahJiwa * NOMINAL_UANG 
+      : formData.jumlahJiwa * NOMINAL_BERAS;
 
-    setDataZakat([newEntry, ...dataZakat]);
-    // Reset form ke nilai default (Beras)
-    setFormData({ ...formData, nama: '', jumlahJiwa: 1, jenisZakat: 'Beras', keterangan: 'Lunas' });
+    try {
+      // Menyimpan data ke Firestore
+      await addDoc(collectionRef, {
+        ...formData,
+        totalZakat,
+        timestamp: Date.now() // Menggantikan id: Date.now() sebelumnya untuk keperluan sorting & export
+      });
+      
+      // Reset form ke nilai default
+      setFormData({ ...formData, nama: '', jumlahJiwa: 1, jenisZakat: 'Beras', keterangan: 'Lunas' });
+    } catch (error) {
+      console.error("Error adding document: ", error);
+      alert("Gagal menyimpan data. Pastikan koneksi internet stabil.");
+    }
   };
 
-  const deleteEntry = (id) => {
-    setDataZakat(dataZakat.filter(item => item.id !== id));
+  const deleteEntry = async (id) => {
+    try {
+      // Menghapus dokumen spesifik di Firestore
+      await deleteDoc(doc(db, 'zakat_baiturrahim_data', id));
+    } catch (error) {
+      console.error("Error deleting document: ", error);
+      alert("Gagal menghapus data.");
+    }
   };
 
-  const resetAllData = () => {
-    setDataZakat([]);
-    setShowConfirmReset(false);
+  const resetAllData = async () => {
+    try {
+      // Untuk menghapus semua data, kita ambil semua dokumen lalu hapus pakai writeBatch
+      const snapshot = await getDocs(collectionRef);
+      const batch = writeBatch(db);
+      
+      snapshot.forEach((document) => {
+        batch.delete(doc(db, 'zakat_baiturrahim_data', document.id));
+      });
+      
+      await batch.commit();
+      setShowConfirmReset(false);
+    } catch (error) {
+      console.error("Error resetting data: ", error);
+      alert("Gagal mereset data.");
+    }
   };
 
   const totals = useMemo(() => {
@@ -100,17 +146,15 @@ const App = () => {
       return;
     }
 
-    // Header CSV
     const headers = ['Nama Muzakki', 'Jumlah Jiwa', 'Jenis Zakat', 'Total Nominal/Berat', 'Keterangan', 'Waktu'];
     
-    // Baris data
     const rows = dataZakat.map(item => [
       `"${item.nama}"`,
       item.jumlahJiwa,
       item.jenisZakat,
       item.jenisZakat === 'Uang' ? item.totalZakat : `${item.totalZakat} Kg`,
       item.keterangan,
-      new Date(item.id).toLocaleString('id-ID')
+      new Date(item.timestamp).toLocaleString('id-ID') // Ubah dari item.id ke item.timestamp
     ]);
 
     const csvContent = [headers, ...rows].map(e => e.join(",")).join("\n");
@@ -249,7 +293,13 @@ const App = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {dataZakat.length === 0 ? (
+                {isLoading ? (
+                   <tr>
+                     <td colSpan="5" className="px-6 py-16 text-center text-gray-400">
+                       Memuat data dari server...
+                     </td>
+                   </tr>
+                ) : dataZakat.length === 0 ? (
                   <tr>
                     <td colSpan="5" className="px-6 py-16 text-center">
                       <div className="flex flex-col items-center opacity-30">
@@ -263,7 +313,9 @@ const App = () => {
                     <tr key={item.id} className="hover:bg-green-50/30 transition group">
                       <td className="px-6 py-4">
                         <p className="font-bold text-gray-800">{item.nama}</p>
-                        <p className="text-[10px] text-gray-400 font-mono">{new Date(item.id).toLocaleTimeString()}</p>
+                        <p className="text-[10px] text-gray-400 font-mono">
+                          {item.timestamp ? new Date(item.timestamp).toLocaleTimeString() : '-'}
+                        </p>
                       </td>
                       <td className="px-6 py-4 text-center font-semibold text-gray-600">{item.jumlahJiwa}</td>
                       <td className="px-6 py-4">
@@ -298,7 +350,7 @@ const App = () => {
                 <AlertTriangle size={32} />
                 <h3 className="text-xl font-bold">Hapus Semua Data?</h3>
               </div>
-              <p className="text-gray-600 mb-6">Tindakan ini akan menghapus seluruh daftar muzakki secara permanen dari browser ini. Anda yakin?</p>
+              <p className="text-gray-600 mb-6">Tindakan ini akan menghapus seluruh daftar muzakki secara permanen dari <strong>Cloud Database</strong>. Anda yakin?</p>
               <div className="flex gap-3">
                 <button 
                   onClick={() => setShowConfirmReset(false)}
